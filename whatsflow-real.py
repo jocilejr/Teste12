@@ -774,7 +774,7 @@ HTML_APP = '''<!DOCTYPE html>
                     contact_name: currentChat.contactName,
                     contact_phone: currentChat.phone,
                     instance_id: currentChat.instanceId,
-                    timestamp: new Date().toISOString()
+                    created_at: new Date().toISOString()
                 };
                 
                 const response = await fetch('/api/webhooks/send', {
@@ -833,7 +833,7 @@ HTML_APP = '''<!DOCTYPE html>
             container.innerHTML = messages.map(msg => `
                 <div style="border: 1px solid #e5e7eb; border-radius: 8px; padding: 15px; margin: 10px 0;">
                     <div style="font-weight: 600;">${msg.from}</div>
-                    <div style="color: #6b7280; font-size: 12px; margin: 5px 0;">${new Date(msg.timestamp).toLocaleString()}</div>
+                    <div style="color: #6b7280; font-size: 12px; margin: 5px 0;">${new Date(msg.created_at).toLocaleString()}</div>
                     <div>${msg.message}</div>
                 </div>
             `).join('');
@@ -1049,24 +1049,39 @@ HTML_APP = '''<!DOCTYPE html>
 </body>
 </html>'''
 
+def ensure_column(cursor, table, column_def):
+    """Ensure a column exists in a SQLite table."""
+    column_name = column_def.split()[0]
+    cursor.execute(f"PRAGMA table_info({table})")
+    columns = [info[1] for info in cursor.fetchall()]
+    if column_name not in columns:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
+
+
 # Database (same as Pure)
 def init_db():
-    """Initialize SQLite database"""
+    """Initialize SQLite database and apply simple migrations"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    
+
     # Instances table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS instances (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             connected INTEGER DEFAULT 0,
+            contacts_count INTEGER DEFAULT 0,
+            messages_today INTEGER DEFAULT 0,
             user_name TEXT,
             user_id TEXT,
             created_at TEXT
         )
     """)
-    
+    ensure_column(cursor, "instances", "contacts_count INTEGER DEFAULT 0")
+    ensure_column(cursor, "instances", "messages_today INTEGER DEFAULT 0")
+    ensure_column(cursor, "instances", "user_name TEXT")
+    ensure_column(cursor, "instances", "user_id TEXT")
+
     # Contacts table (updated with instance_id)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS contacts (
@@ -1078,7 +1093,10 @@ def init_db():
             created_at TEXT
         )
     """)
-    
+    ensure_column(cursor, "contacts", "instance_id TEXT DEFAULT 'default'")
+    ensure_column(cursor, "contacts", "avatar_url TEXT")
+    ensure_column(cursor, "contacts", "created_at TEXT")
+
     # Messages table (updated with instance support)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS messages (
@@ -1093,7 +1111,11 @@ def init_db():
             created_at TEXT
         )
     """)
-    
+    ensure_column(cursor, "messages", "instance_id TEXT DEFAULT 'default'")
+    ensure_column(cursor, "messages", "message_type TEXT DEFAULT 'text'")
+    ensure_column(cursor, "messages", "whatsapp_id TEXT")
+    ensure_column(cursor, "messages", "created_at TEXT")
+
     # Webhooks table (new)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS webhooks (
@@ -1104,7 +1126,8 @@ def init_db():
             created_at TEXT
         )
     """)
-    
+    ensure_column(cursor, "webhooks", "created_at TEXT")
+
     # Chats table (new for conversation management)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS chats (
@@ -1118,7 +1141,12 @@ def init_db():
             created_at TEXT
         )
     """)
-    
+    ensure_column(cursor, "chats", "instance_id TEXT NOT NULL")
+    ensure_column(cursor, "chats", "last_message TEXT")
+    ensure_column(cursor, "chats", "last_message_time TEXT")
+    ensure_column(cursor, "chats", "unread_count INTEGER DEFAULT 0")
+    ensure_column(cursor, "chats", "created_at TEXT")
+
     conn.commit()
     conn.close()
     print("✅ Banco de dados inicializado")
@@ -1456,7 +1484,7 @@ async function connectInstance(instanceId) {
                                     instanceId: instanceId,
                                     from: from,
                                     message: messageText,
-                                    timestamp: new Date().toISOString(),
+                                    created_at: new Date().toISOString(),
                                     messageId: message.key.id,
                                     messageType: message.message.conversation ? 'text' : 'media'
                                 })
@@ -1634,7 +1662,7 @@ app.get('/health', (req, res) => {
             connecting: connectingInstances
         },
         uptime: process.uptime(),
-        timestamp: new Date().toISOString()
+        created_at: new Date().toISOString()
     });
 });
 
@@ -1865,7 +1893,7 @@ class WhatsFlowRealHandler(BaseHTTPRequestHandler):
             conn = sqlite3.connect(DB_FILE)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM messages ORDER BY timestamp DESC LIMIT 50")
+            cursor.execute("SELECT * FROM messages ORDER BY created_at DESC LIMIT 50")
             messages = [dict(row) for row in cursor.fetchall()]
             conn.close()
             self.send_json_response(messages)
@@ -2346,7 +2374,7 @@ class WhatsFlowRealHandler(BaseHTTPRequestHandler):
             instance_id = data.get('instanceId', 'default')
             from_jid = data.get('from', '')
             message = data.get('message', '')
-            timestamp = data.get('timestamp', datetime.now(timezone.utc).isoformat())
+            created_at = data.get('created_at', datetime.now(timezone.utc).isoformat())
             message_id = data.get('messageId', str(uuid.uuid4()))
             message_type = data.get('messageType', 'text')
             
@@ -2369,7 +2397,7 @@ class WhatsFlowRealHandler(BaseHTTPRequestHandler):
                 cursor.execute("""
                     INSERT INTO contacts (id, name, phone, instance_id, created_at)
                     VALUES (?, ?, ?, ?, ?)
-                """, (contact_id, contact_name, phone, instance_id, timestamp))
+                """, (contact_id, contact_name, phone, instance_id, created_at))
                 
                 print(f"📞 Novo contato criado: {contact_name} ({phone}) - Instância: {instance_id}")
             else:
@@ -2380,7 +2408,7 @@ class WhatsFlowRealHandler(BaseHTTPRequestHandler):
             cursor.execute("""
                 INSERT INTO messages (id, contact_name, phone, message, direction, instance_id, message_type, whatsapp_id, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (msg_id, contact_name, phone, message, 'incoming', instance_id, message_type, message_id, timestamp))
+            """, (msg_id, contact_name, phone, message, 'incoming', instance_id, message_type, message_id, created_at))
             
             conn.commit()
             conn.close()
@@ -2397,7 +2425,7 @@ class WhatsFlowRealHandler(BaseHTTPRequestHandler):
             conn = sqlite3.connect(DB_FILE)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM contacts ORDER BY timestamp DESC")
+            cursor.execute("SELECT * FROM contacts ORDER BY created_at DESC")
             contacts = [dict(row) for row in cursor.fetchall()]
             conn.close()
             self.send_json_response(contacts)
